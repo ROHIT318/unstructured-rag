@@ -1,13 +1,13 @@
 import streamlit as st
 import os
-from utils.data_pipeline import store_pdf, store_image
+from utils.data_pipeline import store_pdf, store_image, store_ppt
 import uuid
 
 # Section 1: File upload component, model name, model description, submit button
 with st.form("model_form"):
     uploaded_file = st.file_uploader(
         "Upload your data files", 
-        type=["csv", "xlsx", "xlsm", "xlsb", "jpeg", "jpg", "png", "pdf"], 
+        type=["csv", "xlsx", "xlsm", "xlsb", "jpeg", "jpg", "png", "pdf", "pptx"], 
         accept_multiple_files=True
     )
     model_name = st.text_input("Model Name")
@@ -37,6 +37,14 @@ with st.form("model_form"):
                     with open(temp_file_name, "wb") as f:
                         f.write(file.getbuffer())
                     result = store_image(path=temp_file_name, model_name=model_name)
+
+
+                elif file.name.endswith("pptx"):
+                    temp_file_name = f"data/vector_db/temp_{uuid.uuid4()}_{file.name}"
+                    with open(temp_file_name, "wb") as f:
+                        f.write(file.getbuffer())
+                    result = store_ppt(path=temp_file_name, model_name=model_name)
+                    os.remove(temp_file_name)
 
 
                 elif file.name.endswith("csv"):

@@ -1,9 +1,12 @@
 from pypdf import PdfReader
 from dotenv import load_dotenv
 import os
+import re
 from typing import List
 import uuid
 import streamlit as st
+
+import pandas as pd
 
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_text_splitters import MarkdownHeaderTextSplitter
@@ -86,11 +89,29 @@ def store_pdf(path: str, model_name: str = str(uuid.uuid4()), chunking_method: s
     return "Storing PDF operation completed....."
 
 
+def sanitize_collection_name(model_name: str) -> str:
+    """
+    Chroma only accepts collection names with 3-512 characters from
+    [a-zA-Z0-9._-], starting and ending with an alphanumeric character.
+    Anything else (e.g. spaces) is replaced with underscores, and names that
+    are left too short get a "model_" prefix so the mapping from model name to
+    collection stays deterministic.
+    """
+    sanitized = re.sub(r"[^a-zA-Z0-9._-]", "_", str(model_name))
+    sanitized = sanitized[:512].strip("._-")
+
+    if len(sanitized) < 3:
+        sanitized = ("model_" + sanitized).strip("._-")
+
+    return sanitized
+
+
 def store_in_vector_db(documents: List[str], model_name: str, collection_path: str = "data/vector_db/", embeddings: str = None):
-        
+
+    collection_name = sanitize_collection_name(model_name)
     persistent_client = chromadb.PersistentClient(path=collection_path)
-    persistent_collection = persistent_client.get_or_create_collection(model_name)
-    st.write(f"Created collection {model_name}")
+    persistent_collection = persistent_client.get_or_create_collection(collection_name)
+    st.write(f"Created collection {collection_name}")
 
     ids = []
     for i in range(0, len(documents)):
@@ -130,7 +151,10 @@ def store_image(path: str, model_name: str = None):
     vector = get_image_embedding(image_bytes, mime_type=mime_type)
 
     st.write(f"Created embeddings for image {file_name}.....")
-    result = store_in_vector_db(documents=[path], model_name=model_name, embeddings=[vector])
+    # Images live in their own collection: Gemini image embeddings (3072-dim)
+    # cannot share a collection with text documents, which use Chroma's
+    # default 384-dim embedder.
+    result = store_in_vector_db(documents=[path], model_name=f"{model_name}_images", embeddings=[vector])
     st.write(f"Stored embeddings for image {file_name}.....")
 
     return result
@@ -262,6 +286,115 @@ def store_ppt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: s
             st.write("PPT images were not stored in vector database.....!!")
 
     return "Storing PPT operation completed....."
+
+
+def extract_table_content(path: str):
+    """
+    Read every table of a csv/xlsx/xlsm/xlsb file.
+
+    Arg:
+        path: path to the file.
+
+    Returns:
+        tables: list of {"sheet_name": ..., "dataframe": ...} for every
+        non-empty table. csv files yield a single entry with sheet_name None;
+        Excel workbooks yield one entry per non-empty sheet.
+    """
+    if path.endswith("csv"):
+        sheets = {None: pd.read_csv(path)}
+    else:
+        engine = "pyxlsb" if path.endswith("xlsb") else "openpyxl"
+        sheets = pd.read_excel(path, engine=engine, sheet_name=None)
+
+    tables = []
+    for sheet_name, dataframe in sheets.items():
+        # Skip sheets that have no columns or no rows at all.
+        if dataframe.empty:
+            continue
+        tables.append({"sheet_name": sheet_name, "dataframe": dataframe})
+
+    return tables
+
+
+def store_table(path: str, model_name: str = str(uuid.uuid4())):
+    """
+    Save csv/excel tables as csv files and register them in the vector database.
+
+    The table content itself is not embedded. Each table is written to
+    data/tables/ as a csv, and a small details document (path, sheet name,
+    columns, row count) is stored in the model's text collection so retrieval
+    knows the table exists and can fetch it from disk — the same pointer
+    pattern used for images.
+
+    Arg:
+        path: path to the csv/xlsx/xlsm/xlsb file.
+        model_name: name of the model/collection the data belongs to.
+    """
+    tables = extract_table_content(path)
+    file_name = os.path.basename(path)
+    file_stem = re.sub(r"[^\w\-. ]", "_", file_name.rsplit(".", 1)[0])
+    table_folder = "data/tables/"
+
+    st.write(f"Extracted {len(tables)} table(s) from {file_name}.....")
+
+    table_documents = []
+    for table in tables:
+        # One csv per table; Excel sheets are suffixed with the sheet name.
+        if table["sheet_name"] is None:
+            csv_name = f"{uuid.uuid4()}_{file_stem}.csv"
+        else:
+            sheet_name = re.sub(r"[^\w\-. ]", "_", str(table["sheet_name"]))
+            csv_name = f"{uuid.uuid4()}_{file_stem}__{sheet_name}.csv"
+
+        csv_path = f"{table_folder}{csv_name}"
+        table["dataframe"].to_csv(csv_path, index=False)
+
+        dataframe = table["dataframe"]
+        sheet_line = f" (Sheet: {table['sheet_name']})" if table["sheet_name"] is not None else ""
+        table_documents.append(
+            f"Table: {file_name}{sheet_line}\n"
+            f"Path: {csv_path}\n"
+            f"Columns: {', '.join(str(column) for column in dataframe.columns)}\n"
+            f"Rows: {len(dataframe)}"
+        )
+
+    if table_documents:
+        persistent_collection, ids = store_in_vector_db(documents=table_documents, model_name=model_name)
+        if persistent_collection and ids:
+            st.write("Table details stored in vector database.....")
+        else:
+            st.write("Table details were not stored in vector database.....!!")
+    else:
+        st.write("No tables found in file.....")
+
+    return "Storing table operation completed....."
+
+
+def store_txt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: str = "text_structure_based"):
+    """
+    Arg:
+        path: path to the txt file.
+        chunking_method: What type of chunking do you want to apply on your txt text content. Possible inputs are ["text_structure_based", "markdown_based", "semantic_chunker"]
+
+    """
+    with open(path, "r", encoding="utf-8") as f:
+        text_content = f.read()
+
+    documents = chunked_documents(text_content, chunking_method=chunking_method)
+
+    if documents is not None:
+        st.write("Chunking of TXT completed.....")
+    else:
+        st.write("Chunking issue with TXT.....!!")
+        return
+
+    persistent_collection, ids = store_in_vector_db(documents=documents, model_name=model_name)
+    if persistent_collection and ids:
+        st.write("TXT data stored in vector database.....")
+    else:
+        st.write("TXT data was not stored in vector database.....!!")
+
+    return "Storing TXT operation completed....."
 
 
 if __name__ == "__main__":

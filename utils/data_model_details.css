@@ -1,0 +1,36 @@
+/*
+Layout fixes for the model details view (specs/data_model_editing.md).
+
+Long unbroken strings (document id lists, file paths, raw markdown) must wrap
+instead of spilling out of their entry card; flex children must be allowed to
+shrink so wide content scrolls rather than stretching the card. Table samples
+need no rule here — they render as native st.dataframe widgets, which bring
+their own horizontal/vertical scrollbars.
+
+Loaded and injected by utils/data_model_details.py — edit styles here, not in
+the Python code.
+
+Note: Streamlit's main area is a <section data-testid="stMain">, not a <main>
+element, so selectors must use the test id.
+*/
+
+/* Flex children must be allowed to shrink below their content's natural
+   width — otherwise wide content stretches its card past the page edge. */
+[data-testid="stMain"] [data-testid="stVerticalBlock"] {
+    min-width: 0;
+}
+
+/* Long unbroken strings (id lists, paths, raw markdown) wrap instead of overflowing. */
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] code,
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] li,
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stMain"] [data-testid="stCaptionContainer"] {
+    overflow-wrap: anywhere;
+}
+
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] pre {
+    overflow-x: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+}

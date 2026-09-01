@@ -17,6 +17,7 @@ import chromadb
 
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from PIL import Image
 
 
 from google import genai
@@ -59,34 +60,73 @@ def chunked_documents(text_content: str, chunking_method: str = "text_structure_
     return split_documents
 
 
-def store_pdf(path: str, model_name: str = str(uuid.uuid4()), chunking_method: str ="text_structure_based"):
+def store_pdf(path: str, model_name: str = str(uuid.uuid4()), chunking_method: str = "text_structure_based", file_name: str = None, return_ids: bool = False):
     """
     Arg:
         path: path to the pdf file.
         chunking_method: What type of chunking do you want to apply on your pdf text content. Possible inputs are ["text_structure_based", "markdown_based", "semantic_chunker"]
-    
+        file_name: original uploaded file name; derived from the path when omitted (uploads land in temp_<uuid>_<name> files).
+        return_ids: with True, return a dict with the collection name, the stored document ids and the extracted images (file path + id each) instead of the status string.
     """
+    if file_name is None:
+        file_name = re.sub(r"^temp_[0-9a-fA-F-]{36}_", "", os.path.basename(path))
+
     reader = PdfReader(path)
     text_content = ""
+    image_count = 0
+    text_ids = []
+    pdf_images = []
 
     for page in reader.pages:
-        text_content += page.extract_text()
+        text_content += page.extract_text() or ""
+
+        # Extract embedded images from this page
+        for image in page.images:
+            try:
+                file_stem = file_name.rsplit(".", 1)[0]
+                temp_file_name = f"data/images/{uuid.uuid4()}_{file_stem}.png"
+                st.write(temp_file_name)
+                with open(temp_file_name, "wb") as f:
+                    f.write(image.data)
+                result = store_image(path=temp_file_name, model_name=model_name, file_name=file_name, return_ids=True)
+                if isinstance(result, dict) and result.get("document_ids"):
+                    pdf_images.append({"file_path": temp_file_name, "document_id": result["document_ids"][0]})
+                image_count += 1
+            except Exception as e:
+                st.warning(f"Failed to store image {image.name}: {e}")
+
+    st.success(f"Extracted {image_count} image(s) from PDF.....")
+
+    def _record(result: str) -> dict:
+        return {
+            "result": result,
+            "collection_name": sanitize_collection_name(model_name),
+            "file_name": file_name,
+            "document_ids": text_ids,
+            "images": pdf_images,
+        }
+
+    if not text_content.strip():
+        st.warning("No text layer found in PDF — likely scanned, skipping text chunking.....!!")
+        return _record("Storing PDF operation completed (images only).....") if return_ids else "Storing PDF operation completed (images only)....."
 
     documents = chunked_documents(text_content, chunking_method=chunking_method)
 
-    if documents is not None: 
-        st.write("Chunking of PDF completed.....")
+    if documents is not None:
+        st.success("Chunking of PDF completed.....")
     else:
-        st.write("Chunking issue with PDF.....!!")
-        return
+        st.warning("Chunking issue with PDF.....!!")
+        return _record("Storing PDF operation failed.....") if return_ids else None
 
-    persistent_collection, ids = store_in_vector_db(documents=documents, model_name=model_name)
-    if persistent_collection and ids:
-        st.write("PDF data stored in vector database.....")
+    # Source metadata ties every chunk back to its file so its ids are queryable (specs/create_db_markdown_file_rest.md §4).
+    chunk_metadata = {"file_name": file_name, "file_type": "pdf", "model_name": model_name}
+    persistent_collection, text_ids = store_in_vector_db(documents=documents, model_name=model_name, metadata=chunk_metadata)
+    if persistent_collection and text_ids:
+        st.success("PDF data stored in vector database.....")
     else:
-        st.write("PDF data was not stored in vector database.....!!")
+        st.warning("PDF data was not stored in vector database.....!!")
 
-    return "Storing PDF operation completed....."
+    return _record("Storing PDF operation completed.....") if return_ids else "Storing PDF operation completed....."
 
 
 def sanitize_collection_name(model_name: str) -> str:
@@ -106,21 +146,24 @@ def sanitize_collection_name(model_name: str) -> str:
     return sanitized
 
 
-def store_in_vector_db(documents: List[str], model_name: str, collection_path: str = "data/vector_db/", embeddings: str = None):
+def store_in_vector_db(documents: List[str], model_name: str, collection_path: str = "data/vector_db/", embeddings: str = None, metadata: dict | List[dict] = None):
 
     collection_name = sanitize_collection_name(model_name)
     persistent_client = chromadb.PersistentClient(path=collection_path)
     persistent_collection = persistent_client.get_or_create_collection(collection_name)
-    st.write(f"Created collection {collection_name}")
+    st.success(f"Created collection {collection_name}")
 
     ids = []
-    for i in range(0, len(documents)):
+    for _ in range(0, len(documents)):
         ids.append(str(uuid.uuid4()))
 
+    # A single dict is attached to every document; a list carries per-document metadata.
+    metadatas = [metadata] * len(documents) if isinstance(metadata, dict) else metadata
+
     if embeddings is None:
-        persistent_collection.add(documents=documents, ids=ids)
+        persistent_collection.add(documents=documents, ids=ids, metadatas=metadatas)
     else:
-        persistent_collection.add(documents=documents, embeddings=embeddings, ids=ids)
+        persistent_collection.add(documents=documents, embeddings=embeddings, ids=ids, metadatas=metadatas)
 
     return persistent_collection, ids
 
@@ -133,7 +176,13 @@ def get_image_embedding(image_bytes: bytes, mime_type: str = "image/png") -> lis
     return result.embeddings[0].values
 
 
-def store_image(path: str, model_name: str = None): 
+def store_image(path: str, model_name: str = None, file_name: str = None, return_ids: bool = False):
+    """
+    Arg:
+        path: path to the image file.
+        file_name: original uploaded file name; derived from the path when omitted (uploads land in <uuid>_<name> files).
+        return_ids: with True, return a dict with the collection name, the stored document ids and the file path instead of the status string.
+    """
     image_bytes = b""
 
     if path is None:
@@ -142,22 +191,32 @@ def store_image(path: str, model_name: str = None):
     if model_name is None:
         model_name = str(uuid.uuid4())
 
+    if file_name is None:
+        file_name = re.sub(r"^[0-9a-fA-F-]{36}_", "", os.path.basename(path))
+
     with open(path, "rb") as f:
         image_bytes = f.read()
 
     mime_type = "image/png" if path.endswith(".png") else "image/jpeg"
-    file_name = path.split('/')[-1]
 
     vector = get_image_embedding(image_bytes, mime_type=mime_type)
 
-    st.write(f"Created embeddings for image {file_name}.....")
-    # Images live in their own collection: Gemini image embeddings (3072-dim)
-    # cannot share a collection with text documents, which use Chroma's
-    # default 384-dim embedder.
-    result = store_in_vector_db(documents=[path], model_name=f"{model_name}_images", embeddings=[vector])
-    st.write(f"Stored embeddings for image {file_name}.....")
+    st.success(f"Created embeddings for image {file_name}.....")
+    # Source metadata ties the document back to its file so its id is queryable (specs/create_db_markdown_file_rest.md §4).
+    image_metadata = {"file_name": file_name, "file_type": "image", "model_name": model_name, "file_path": path}
+    persistent_collection, ids = store_in_vector_db(documents=[path], model_name=f"{model_name}_images", embeddings=[vector], metadata=image_metadata)
+    st.success(f"Stored embeddings for image {file_name}.....")
 
-    return result
+    if return_ids:
+        return {
+            "result": "Storing image operation completed.....",
+            "collection_name": sanitize_collection_name(f"{model_name}_images"),
+            "file_name": file_name,
+            "file_path": path,
+            "document_ids": ids,
+        }
+
+    return persistent_collection, ids
 
 
 def extract_ppt_content(path: str):
@@ -223,7 +282,7 @@ def extract_ppt_content(path: str):
     return text_content, images
 
 
-def store_ppt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: str = "text_structure_based"):
+def store_ppt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: str = "text_structure_based", file_name: str = None, return_ids: bool = False):
     """
     Extract text and images from a pptx file and store them in the vector database.
 
@@ -235,35 +294,53 @@ def store_ppt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: s
         path: path to the pptx file.
         model_name: name of the model/collection the data belongs to.
         chunking_method: chunking to apply on the slide text. Possible inputs are ["text_structure_based", "markdown_based", "semantic_chunker"]
+        file_name: original uploaded file name; derived from the path when omitted (uploads land in temp_<uuid>_<name> files).
+        return_ids: with True, return a dict with the collection name, the stored document ids and the slide images (file path + id each) instead of the status string.
     """
-    text_content, images = extract_ppt_content(path)
-    file_name = path.split('/')[-1]
-    image_folder = "data/images/"
+    if file_name is None:
+        file_name = re.sub(r"^temp_[0-9a-fA-F-]{36}_", "", os.path.basename(path))
 
-    st.write(f"Extracted {len(images)} image(s) from PPT {file_name}.....")
+    text_content, images = extract_ppt_content(path)
+    image_folder = "data/images/"
+    text_ids = []
+    image_records = []
+
+    st.success(f"Extracted {len(images)} image(s) from PPT {file_name}.....")
+
+    def _record(result: str) -> dict:
+        return {
+            "result": result,
+            "collection_name": sanitize_collection_name(model_name),
+            "file_name": file_name,
+            "document_ids": text_ids,
+            "images": image_records,
+        }
 
     # Store slide text.
     if text_content.strip():
         documents = chunked_documents(text_content, chunking_method=chunking_method)
 
         if documents is not None:
-            st.write("Chunking of PPT text completed.....")
+            st.success("Chunking of PPT text completed.....")
         else:
-            st.write("Chunking issue with PPT.....!!")
-            return
+            st.warning("Chunking issue with PPT.....!!")
+            return _record("Storing PPT operation failed.....") if return_ids else None
 
-        persistent_collection, ids = store_in_vector_db(documents=documents, model_name=model_name)
-        if persistent_collection and ids:
-            st.write("PPT text stored in vector database.....")
+        # Source metadata ties every chunk back to its file so its ids are queryable (specs/create_db_markdown_file_rest.md §4).
+        chunk_metadata = {"file_name": file_name, "file_type": "ppt", "model_name": model_name}
+        persistent_collection, text_ids = store_in_vector_db(documents=documents, model_name=model_name, metadata=chunk_metadata)
+        if persistent_collection and text_ids:
+            st.success("PPT text stored in vector database.....")
         else:
-            st.write("PPT text was not stored in vector database.....!!")
+            st.warning("PPT text was not stored in vector database.....!!")
     else:
-        st.write("No text content found in PPT.....")
+        st.warning("No text content found in PPT.....")
 
     # Store slide images in a separate image collection.
     if images:
         image_documents = []
         image_embeddings = []
+        image_metadata = []
 
         for image in images:
             # Keep the picture on disk so retrieval can load it back later, the same
@@ -274,18 +351,21 @@ def store_ppt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: s
 
             image_documents.append(image_path)
             image_embeddings.append(get_image_embedding(image["bytes"], mime_type=image["mime_type"]))
+            image_metadata.append({"file_name": file_name, "file_type": "image", "model_name": model_name, "file_path": image_path})
 
-        persistent_collection, ids = store_in_vector_db(
+        persistent_collection, image_ids = store_in_vector_db(
             documents=image_documents,
             model_name=f"{model_name}_images",
             embeddings=image_embeddings,
+            metadata=image_metadata,
         )
-        if persistent_collection and ids:
-            st.write("PPT images stored in vector database.....")
+        if persistent_collection and image_ids:
+            st.success("PPT images stored in vector database.....")
+            image_records = [{"file_path": document, "document_id": document_id} for document, document_id in zip(image_documents, image_ids)]
         else:
-            st.write("PPT images were not stored in vector database.....!!")
+            st.warning("PPT images were not stored in vector database.....!!")
 
-    return "Storing PPT operation completed....."
+    return _record("Storing PPT operation completed.....") if return_ids else "Storing PPT operation completed....."
 
 
 def extract_table_content(path: str):
@@ -316,7 +396,7 @@ def extract_table_content(path: str):
     return tables
 
 
-def store_table(path: str, model_name: str = str(uuid.uuid4())):
+def store_table(path: str, model_name: str = str(uuid.uuid4()), file_name: str = None, return_ids: bool = False):
     """
     Save csv/excel tables as csv files and register them in the vector database.
 
@@ -329,21 +409,29 @@ def store_table(path: str, model_name: str = str(uuid.uuid4())):
     Arg:
         path: path to the csv/xlsx/xlsm/xlsb file.
         model_name: name of the model/collection the data belongs to.
+        file_name: original uploaded file name; derived from the path when omitted (uploads land in temp_<uuid>_<name> files).
+        return_ids: with True, return a dict with the collection name and one record per extracted table (table name, csv path, top 5 rows, column names, column data types) instead of the status string.
     """
+    if file_name is None:
+        file_name = re.sub(r"^temp_[0-9a-fA-F-]{36}_", "", os.path.basename(path))
+
     tables = extract_table_content(path)
-    file_name = os.path.basename(path)
     file_stem = re.sub(r"[^\w\-. ]", "_", file_name.rsplit(".", 1)[0])
     table_folder = "data/tables/"
 
-    st.write(f"Extracted {len(tables)} table(s) from {file_name}.....")
+    st.success(f"Extracted {len(tables)} table(s) from {file_name}.....")
 
     table_documents = []
+    table_metadata = []
+    table_records = []
     for table in tables:
         # One csv per table; Excel sheets are suffixed with the sheet name.
         if table["sheet_name"] is None:
+            table_name = file_name
             csv_name = f"{uuid.uuid4()}_{file_stem}.csv"
         else:
-            sheet_name = re.sub(r"[^\w\-. ]", "_", str(table["sheet_name"]))
+            table_name = str(table["sheet_name"])
+            sheet_name = re.sub(r"[^\w\-. ]", "_", table_name)
             csv_name = f"{uuid.uuid4()}_{file_stem}__{sheet_name}.csv"
 
         csv_path = f"{table_folder}{csv_name}"
@@ -357,42 +445,75 @@ def store_table(path: str, model_name: str = str(uuid.uuid4())):
             f"Columns: {', '.join(str(column) for column in dataframe.columns)}\n"
             f"Rows: {len(dataframe)}"
         )
+        # Source metadata ties the details document back to its file so it is queryable (specs/create_db_markdown_file_rest.md §4).
+        table_metadata.append({"file_name": file_name, "file_type": "table", "model_name": model_name, "csv_path": csv_path})
+
+        table_records.append({
+            "table_name": table_name,
+            "csv_path": csv_path,
+            "top_5_rows": dataframe.head(5).to_dict(orient="records"),
+            "column_names": [str(column) for column in dataframe.columns],
+            "column_types": [f"{column}: {dataframe.dtypes[column]}" for column in dataframe.columns],
+        })
 
     if table_documents:
-        persistent_collection, ids = store_in_vector_db(documents=table_documents, model_name=model_name)
+        persistent_collection, ids = store_in_vector_db(documents=table_documents, model_name=model_name, metadata=table_metadata)
         if persistent_collection and ids:
-            st.write("Table details stored in vector database.....")
+            st.success("Table details stored in vector database.....")
         else:
-            st.write("Table details were not stored in vector database.....!!")
+            st.warning("Table details were not stored in vector database.....!!")
     else:
-        st.write("No tables found in file.....")
+        st.warning("No tables found in file.....")
+
+    if return_ids:
+        return {
+            "result": "Storing table operation completed.....",
+            "collection_name": sanitize_collection_name(model_name),
+            "file_name": file_name,
+            "tables": table_records,
+        }
 
     return "Storing table operation completed....."
 
 
-def store_txt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: str = "text_structure_based"):
+def store_txt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: str = "text_structure_based", file_name: str = None, return_ids: bool = False):
     """
     Arg:
         path: path to the txt file.
         chunking_method: What type of chunking do you want to apply on your txt text content. Possible inputs are ["text_structure_based", "markdown_based", "semantic_chunker"]
+        file_name: original uploaded file name; derived from the path when omitted (uploads land in temp_<uuid>_<name> files).
+        return_ids: with True, return a dict with the collection name and the stored document ids instead of the status string.
 
     """
+    if file_name is None:
+        file_name = re.sub(r"^temp_[0-9a-fA-F-]{36}_", "", os.path.basename(path))
+
     with open(path, "r", encoding="utf-8") as f:
         text_content = f.read()
 
     documents = chunked_documents(text_content, chunking_method=chunking_method)
 
     if documents is not None:
-        st.write("Chunking of TXT completed.....")
+        st.success("Chunking of TXT completed.....")
     else:
-        st.write("Chunking issue with TXT.....!!")
+        st.warning("Chunking issue with TXT.....!!")
         return
 
-    persistent_collection, ids = store_in_vector_db(documents=documents, model_name=model_name)
+    # Source metadata ties every chunk back to its file so its ids are queryable (specs/create_db_markdown_file_txt.md §5).
+    chunk_metadata = {"file_name": file_name, "file_type": "txt", "model_name": model_name}
+    persistent_collection, ids = store_in_vector_db(documents=documents, model_name=model_name, metadata=chunk_metadata)
     if persistent_collection and ids:
-        st.write("TXT data stored in vector database.....")
+        st.success("TXT data stored in vector database.....")
     else:
-        st.write("TXT data was not stored in vector database.....!!")
+        st.warning("TXT data was not stored in vector database.....!!")
+
+    if return_ids:
+        return {
+            "result": "Storing TXT operation completed.....",
+            "collection_name": sanitize_collection_name(model_name),
+            "file_name": file_name,
+            "document_ids": ids,
+        }
 
     return "Storing TXT operation completed....."
 

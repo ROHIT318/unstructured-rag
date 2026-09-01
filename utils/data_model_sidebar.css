@@ -1,0 +1,36 @@
+/*
+Selected-model highlight for the Data Upload page's left pane
+(specs/data_model_editing.md §7).
+
+The button of the model currently shown in the main area is rendered as the
+sidebar's only primary button; these rules recolor it so it stands out from
+the other (secondary) model buttons. Loaded and injected by
+utils/data_model_sidebar.py — edit the colors here, not in the Python code.
+
+The selector variants cover Streamlit's button markup across versions (the
+kind attribute and/or the stBaseButton-primary test id).
+*/
+
+section[data-testid="stSidebar"] button[kind="primary"],
+section[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"],
+section[data-testid="stSidebar"] [data-testid="stBaseButton-primary"] button {
+    background-color: #1e88e5 !important;
+    border: 1px solid #1e88e5 !important;
+    color: #ffffff !important;
+}
+
+section[data-testid="stSidebar"] button[kind="primary"]:hover,
+section[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"]:hover,
+section[data-testid="stSidebar"] [data-testid="stBaseButton-primary"] button:hover {
+    background-color: #1976d2 !important;
+    border-color: #1976d2 !important;
+    color: #ffffff !important;
+}
+
+section[data-testid="stSidebar"] button[kind="primary"]:focus,
+section[data-testid="stSidebar"] button[data-testid="stBaseButton-primary"]:focus,
+section[data-testid="stSidebar"] [data-testid="stBaseButton-primary"] button:focus {
+    background-color: #1e88e5 !important;
+    border-color: #1e88e5 !important;
+    color: #ffffff !important;
+}

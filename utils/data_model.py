@@ -1,75 +1,53 @@
 import streamlit as st
-import os
-from utils.data_pipeline import store_pdf, store_image, store_ppt, store_table, store_txt
-import uuid
 
-# Section 1: File upload component, model name, model description, submit button
-with st.form("model_form"):
-    uploaded_file = st.file_uploader(
-        "Upload your data files", 
-        type=["csv", "xlsx", "xlsm", "xlsb", "txt", "jpeg", "jpg", "png", "pdf", "pptx"],
-        accept_multiple_files=True
-    )
-    model_name = st.text_input("Model Name")
-    model_description = st.text_input("model_description")
-    submitted = st.form_submit_button("Submit")
-
-    if submitted:
-
-        file_upload_location = []
-
-        # with st.spinner(text="Model Creation In Progress .....", show_time=True):
-        with st.status("Model Creation In Progress .....", expanded=False) as status:
-            for file in uploaded_file:
-                st.write(f"Processing file {file.name}" )
-
-                if file.name.endswith("pdf"):
-                    temp_file_name = f"data/vector_db/temp_{uuid.uuid4()}_{file.name}"
-                    with open(temp_file_name, "wb") as f:
-                        f.write(file.getbuffer())
-                    result = store_pdf(path=temp_file_name, model_name=model_name)
-                    os.remove(temp_file_name)             
+from utils.data_model_creation import data_model_creation
+from utils.data_model_details import render_details_view
+from utils.data_model_ingestion import ingest_uploaded_files
+from utils.data_model_sidebar import render_sidebar
 
 
-                elif file.name.endswith(("jpeg", "jpg", "png")):
-                    temp_file_name = f"data/images/{uuid.uuid4()}_{file.name}"
-                    image_bytes = ""
-                    with open(temp_file_name, "wb") as f:
-                        f.write(file.getbuffer())
-                    result = store_image(path=temp_file_name, model_name=model_name)
+def render_create_view() -> None:
+    """The upload form — unchanged fields, dispatch, and messages."""
+    message = st.session_state.pop("create_view_message", None)
+    warning = st.session_state.pop("create_view_warning", None)
+    if message:
+        st.success(message)
+    if warning:
+        st.warning(warning)
+
+    with st.form("model_form"):
+        uploaded_file = st.file_uploader(
+            "Upload your data files",
+            type=["csv", "xlsx", "xlsm", "xlsb", "txt", "jpeg", "jpg", "png", "pdf", "pptx"],
+            accept_multiple_files=True
+        )
+        model_name = st.text_input("Model Name")
+        model_description = st.text_input("model_description")
+        submitted = st.form_submit_button("Submit")
+
+        if submitted:
+            ingestion_records = ingest_uploaded_files(uploaded_file, model_name)
+
+            try:
+                record_path = data_model_creation(model_name=model_name, description=model_description,
+                                                  ingestion_records=ingestion_records)
+                # The sidebar rendered before this submission was processed, so
+                # it still lists the pre-creation models — rerun (with the
+                # success message carried in session state) to refresh it and
+                # show the new model without a manual page refresh.
+                st.session_state["create_view_message"] = f"Model record updated: {record_path}"
+                st.rerun()
+            except Exception as e:
+                st.warning(f"Failed to write model description: {e}")
 
 
-                elif file.name.endswith("pptx"):
-                    temp_file_name = f"data/vector_db/temp_{uuid.uuid4()}_{file.name}"
-                    with open(temp_file_name, "wb") as f:
-                        f.write(file.getbuffer())
-                    result = store_ppt(path=temp_file_name, model_name=model_name)
-                    os.remove(temp_file_name)
+render_sidebar()
 
-
-                elif file.name.endswith(("csv", "xlsx", "xlsm", "xlsb")):
-                    temp_file_name = f"data/vector_db/temp_{uuid.uuid4()}_{file.name}"
-                    with open(temp_file_name, "wb") as f:
-                        f.write(file.getbuffer())
-                    result = store_table(path=temp_file_name, model_name=model_name)
-                    os.remove(temp_file_name)
-
-
-                elif file.name.endswith("txt"):
-                    temp_file_name = f"data/vector_db/temp_{uuid.uuid4()}_{file.name}"
-                    with open(temp_file_name, "wb") as f:
-                        f.write(file.getbuffer())
-                    result = store_txt(path=temp_file_name, model_name=model_name)
-                    os.remove(temp_file_name)
-
-
-                else:
-                    st.write(f"Unsupported file type: {file.name}")
-                    result = f"Skipped {file.name}: unsupported file type"
-
-                st.write(result)
-
-            status.update(label="Model creation completed!!", state="complete", expanded=False)
+selected_model = st.session_state.get("selected_model")
+if selected_model:
+    render_details_view(selected_model)
+else:
+    render_create_view()
 
 # Section 2: Add relationship option: Manual or autmatic relationship creation and end user getting the option to add or remove it
 

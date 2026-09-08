@@ -27,9 +27,21 @@ load_dotenv()
 
 GEMINI_EMBEDDING_API_KEY = os.getenv("GEMINI_EMBEDDING_API_KEY")
 GEMINI_EMBEDDING_MODEL = os.getenv("GEMINI_EMBEDDING_MODEL")
+BASE_URL = os.getenv("BASE_URL")
 
-embedding_model = GoogleGenerativeAIEmbeddings(model=GEMINI_EMBEDDING_MODEL, google_api_key=GEMINI_EMBEDDING_API_KEY)
-client = genai.Client(api_key=GEMINI_EMBEDDING_API_KEY)
+embedding_kwargs = {
+    "model": GEMINI_EMBEDDING_MODEL,
+    "google_api_key": GEMINI_EMBEDDING_API_KEY,
+}
+if BASE_URL:
+    embedding_kwargs["base_url"] = BASE_URL
+
+embedding_model = GoogleGenerativeAIEmbeddings(**embedding_kwargs)
+
+client_kwargs = {"api_key": GEMINI_EMBEDDING_API_KEY}
+if BASE_URL:
+    client_kwargs["http_options"] = {"base_url": BASE_URL}
+client = genai.Client(**client_kwargs)
 
 
 def chunked_documents(text_content: str, chunking_method: str = "text_structure_based"):
@@ -45,7 +57,7 @@ def chunked_documents(text_content: str, chunking_method: str = "text_structure_
         split_documents = text_splitter.create_documents([text_content])
 
     elif chunking_method=="text_structure_based":
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=0)
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         split_documents = text_splitter.split_text(text_content)
 
     else:

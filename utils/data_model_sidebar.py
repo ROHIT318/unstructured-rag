@@ -1,57 +1,25 @@
-"""
-Left pane of the Data Upload page (specs/data_model_nav.md, and the highlight
-of specs/data_model_editing.md §7): the Create New Data Model button and the
-existing data models, listed by their display name when a record exists. The
-model details themselves render in the main area (utils/data_model_details.py)
-— only when a model button is clicked here.
-"""
-
-import os
 from pathlib import Path
 
-import chromadb
 import streamlit as st
-from dotenv import load_dotenv
 
-from utils.data_pipeline import sanitize_collection_name
 from utils.data_model_creation import model_display_name, recorded_models
+from utils.neo4j_ingestion import get_model_names
 
-load_dotenv()
-
-VECTOR_DB_PATH = os.getenv("VECTOR_DB_PATH") or "data/vector_db/"
 SIDEBAR_CSS_PATH = Path(__file__).parent / "data_model_sidebar.css"
 
 
-def model_collection_counts(model_name: str) -> dict:
-    """Best-effort document counts of a model's text and image collections."""
-    sanitized = sanitize_collection_name(model_name)
-    counts = {}
-    client = chromadb.PersistentClient(path=VECTOR_DB_PATH)
-    for label, collection_name in (("text", sanitized), ("images", f"{sanitized}_images")):
-        try:
-            counts[label] = client.get_collection(collection_name).count()
-        except Exception:
-            continue
-    return counts
-
-
-def list_models(vector_db_path: str = VECTOR_DB_PATH) -> list[str]:
+def list_models() -> list[str]:
     """
-    Names of the data models that exist in the vector DB.
-    ----
-    A collection named `<model>_images` belongs to `<model>` — it is never a model of
-    its own. Entries are deduped and sorted alphabetically; every collection counts,
-    nothing is filtered out. An unopenable DB yields an empty list. Models with a
-    record file but no collections (e.g. created with no files uploaded) are included
-    too, so they stay reachable and deletable.
+    Names of the data models that exist — the Model nodes in Neo4j, unioned
+    with every model that has a record file (records created before the Neo4j
+    switch have no Model node; they stay reachable and deletable through this
+    union). Entries are deduped and sorted alphabetically; an unreachable
+    database yields the record-only list.
     """
     try:
-        client = chromadb.PersistentClient(path=vector_db_path)
-        collection_names = [collection.name for collection in client.list_collections()]
+        models = set(get_model_names())
     except Exception:
-        collection_names = []
-    models = {name[: -len("_images")] if name.endswith("_images") else name
-              for name in collection_names}
+        models = set()
     models.update(recorded_models())
     return sorted(models)
 

@@ -2,7 +2,7 @@ import streamlit as st
 import os
 
 # create folders required for functionality
-MEDIA_FOLDER_NAME_LS = ["data", "data/images", "data/vector_db", "data/tables", "data/conversion_history"]
+MEDIA_FOLDER_NAME_LS = ["data", "data/images", "data/temp", "data/tables", "data/conversion_history"]
 for media_folder_name in MEDIA_FOLDER_NAME_LS: 
     if not os.path.exists(media_folder_name):
         os.makedirs(media_folder_name)

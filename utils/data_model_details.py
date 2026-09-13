@@ -1,19 +1,3 @@
-"""
-Editable data model details view — specs/data_model_editing.md.
-
-Rendered in the main area of the Data Upload page when a model is selected in
-the left pane: the model's name (display name) and description are editable,
-every ingested file has an editable description and a delete button, new files
-can be added to the model, and the whole model can be deleted. All mutations go
-through the headless functions of utils/data_model_creation.py — this module
-only renders and dispatches. Destructive actions use a two-step confirmation
-(§5, §6) and never run on a single click.
-
-Widget keys carry the underlying model name (and, for per-file widgets, the
-file name and its occurrence among the entries) so editor state never leaks
-from one model or file to another.
-"""
-
 import re
 from collections import Counter
 from pathlib import Path
@@ -21,20 +5,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from utils.data_model_creation import (
-    data_model_creation,
-    delete_model,
-    model_display_name,
-    read_model_description,
-    read_model_entries,
-    remove_file_entry,
-    update_file_description,
-    update_model_description,
-    update_model_display_name,
-    update_table_description,
-)
+from utils.data_model_creation import data_model_creation, delete_model, model_display_name, read_model_description, read_model_entries, remove_file_entry, update_file_description, update_model_description, update_model_display_name, update_table_description
 from utils.data_model_ingestion import ingest_uploaded_files
-from utils.data_model_sidebar import VECTOR_DB_PATH, list_models, model_collection_counts
+from utils.data_model_sidebar import list_models
+from utils.neo4j_ingestion import model_node_counts
 
 UPLOADER_TYPES = ["csv", "xlsx", "xlsm", "xlsb", "txt", "jpeg", "jpg", "png", "pdf", "pptx"]
 DETAILS_CSS_PATH = Path(__file__).parent / "data_model_details.css"
@@ -86,11 +60,11 @@ def _render_no_record_view(model_name: str) -> None:
     st.header(model_name)
     st.markdown("**Description:** *(no description recorded)*")
 
-    counts = model_collection_counts(model_name)
+    counts = model_node_counts(model_name)
     if "text" in counts:
-        st.write(f"Text collection: {counts['text']} document(s)")
+        st.write(f"Text chunks: {counts['text']}")
     if "images" in counts:
-        st.write(f"Image collection: {counts['images']} document(s)")
+        st.write(f"Images: {counts['images']}")
     st.caption("This model has no record file — add files below to create one.")
 
     _render_add_files(model_name, model_name)
@@ -98,7 +72,7 @@ def _render_no_record_view(model_name: str) -> None:
 
 
 def _render_name_editor(model_name: str, display_name: str) -> None:
-    """§2 — display-name editing. Collections and the markdown file name stay untouched."""
+    """§2 — display-name editing. The Model node's key and the markdown file name stay untouched."""
     name_col, button_col = st.columns([4, 1])
     with name_col:
         new_name = st.text_input("Model name", value=display_name, key=f"edit_model_name_{model_name}")
@@ -202,11 +176,10 @@ def _render_file_entries(model_name: str) -> None:
                 st.warning(f"Delete {entry['file_name']} and all of its stored data?")
                 confirm_col, cancel_col = st.columns(2)
                 if confirm_col.button("Confirm delete", key=f"confirm_delete_file_{key_id}", type="primary"):
-                    summary = remove_file_entry(model_name, entry["file_name"],
-                                                vector_db_path=VECTOR_DB_PATH)
+                    summary = remove_file_entry(model_name, entry["file_name"])
                     st.session_state.pop("pending_file_delete", None)
                     st.session_state["details_message"] = (
-                        f"Deleted {entry['file_name']}: {summary.get('documents_deleted', 0)} document(s), "
+                        f"Deleted {entry['file_name']}: {summary.get('nodes_deleted', 0)} node(s), "
                         f"{summary.get('files_removed', 0)} file(s) removed."
                     )
                     st.rerun()
@@ -288,16 +261,16 @@ def _render_delete_model(model_name: str, display_name: str) -> None:
 
     if st.session_state.get(confirm_key):
         st.warning(
-            f"Delete the entire model {display_name}? This removes its collections, its stored "
-            "files, and its record — this cannot be undone."
+            f"Delete the entire model {display_name}? This removes its stored data in Neo4j, "
+            "its stored files, and its record — this cannot be undone."
         )
         confirm_col, cancel_col = st.columns(2)
         if confirm_col.button("Confirm delete", key=f"confirm_delete_model_{model_name}", type="primary"):
-            summary = delete_model(model_name, vector_db_path=VECTOR_DB_PATH)
+            summary = delete_model(model_name)
             st.session_state.pop(confirm_key, None)
             st.session_state.pop("selected_model", None)
             st.session_state["create_view_message"] = (
-                f"Deleted model {display_name}: {len(summary['collections_deleted'])} collection(s), "
+                f"Deleted model {display_name}: {summary['nodes_deleted']} node(s), "
                 f"{summary['files_removed']} file(s), "
                 f"{'record removed' if summary['description_removed'] else 'no record found'}."
             )

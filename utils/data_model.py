@@ -26,7 +26,8 @@ def render_create_view() -> None:
         submitted = st.form_submit_button("Submit")
 
         if submitted:
-            ingestion_records = ingest_uploaded_files(uploaded_file, model_name)
+            ingestion_records = ingest_uploaded_files(uploaded_file, model_name,
+                                                      model_description=model_description)
 
             try:
                 record_path = data_model_creation(model_name=model_name, description=model_description,

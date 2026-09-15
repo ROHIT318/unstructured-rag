@@ -21,9 +21,9 @@ NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE")
 graph = Neo4jGraph(url=NEO4J_URI, username=NEO4J_USERNAME, password=NEO4J_PASSWORD, database=NEO4J_DATABASE)
 
-# Text chunk embeddings use a fixed output dimensionality (§4 of the migration
-# spec); image embeddings keep Gemini's full default dimension, so the two
-# vector indexes are configured independently.
+# One shared dimension setting governs all text embeddings — chunk embeddings
+# and the image nodes' semantic / OCR text embeddings alike (§"Embedding
+# dimension" of the image OCR spec). Changing it is a one-place change.
 TEXT_EMBEDDING_DIMENSION = 256
 
 # Node labels and their id properties — delete_nodes_by_ids goes through this
@@ -66,10 +66,10 @@ def txt_to_embeddings(documents: List[str], embeddings_dimension: int = TEXT_EMB
 def setup_schema() -> None:
     """
     Uniqueness constraints on every node label's id property (and on
-    Model.model_name, the key models are looked up by), plus the Chunk vector
-    index. The Image vector index is created lazily by
-    ensure_image_vector_index — its dimension is only known once the first
-    image embedding exists.
+    Model.model_name, the key models are looked up by), plus the three vector
+    indexes: the Chunk embedding index and the two Image text-embedding indexes
+    (semantic meaning, OCR). All share TEXT_EMBEDDING_DIMENSION, so all are
+    created here at fixed dimension — no lazy creation needed.
     """
     for label, id_property in _NODE_KINDS.values():
         graph.query(
@@ -84,19 +84,19 @@ def setup_schema() -> None:
                 `vector.similarity_function`: 'cosine'
             }}}}"""
     )
-
-
-def ensure_image_vector_index(dimension: int) -> None:
-    """
-    Create the Image embedding vector index on first use. Image embeddings are
-    not dimension-reduced the way text embeddings are, so the index dimension
-    comes from the first embedding actually generated.
-    """
     graph.query(
-        f"""CREATE VECTOR INDEX image_embedding_index IF NOT EXISTS
-            FOR (i:Image) ON (i.embedding)
+        f"""CREATE VECTOR INDEX image_semantic_embedding_index IF NOT EXISTS
+            FOR (i:Image) ON (i.semantic_embedding)
             OPTIONS {{indexConfig: {{
-                `vector.dimensions`: {dimension},
+                `vector.dimensions`: {TEXT_EMBEDDING_DIMENSION},
+                `vector.similarity_function`: 'cosine'
+            }}}}"""
+    )
+    graph.query(
+        f"""CREATE VECTOR INDEX image_ocr_embedding_index IF NOT EXISTS
+            FOR (i:Image) ON (i.ocr_embedding)
+            OPTIONS {{indexConfig: {{
+                `vector.dimensions`: {TEXT_EMBEDDING_DIMENSION},
                 `vector.similarity_function`: 'cosine'
             }}}}"""
     )
@@ -169,7 +169,10 @@ def store_file_elements(file_id: str, elements: List[dict]) -> dict:
     sheet by sheet for a workbook. The kinds:
 
         {"kind": "chunk", "content": str or langchain Document}
-        {"kind": "image", "file_name": str, "file_path": str, "embedding": list}
+        {"kind": "image", "file_name": str, "file_path": str,
+         "semantic_meaning": str, "semantic_embedding": list,
+         "ocr_text": str, "ocr_embedding": list}   # ocr_embedding omitted
+                                                   # when ocr_text is empty
         {"kind": "table", "table_name": str, "csv_path": str,
          "column_names": list, "column_types": list, "row_count": int}
 
@@ -204,13 +207,20 @@ def store_file_elements(file_id: str, elements: List[dict]) -> dict:
             })
             chunk_counter += 1
         elif kind == "image":
-            image_rows.append({
+            image_row = {
                 "image_id": str(uuid.uuid4()),
                 "element_index": element_index,
                 "file_name": element["file_name"],
                 "file_path": element["file_path"],
-                "embedding": element["embedding"],
-            })
+                "semantic_meaning": element["semantic_meaning"],
+                "semantic_embedding": element["semantic_embedding"],
+                "ocr_text": element["ocr_text"],
+            }
+            # No readable text -> no ocr_embedding property at all: the node
+            # simply stays out of the OCR vector index.
+            if element["ocr_text"]:
+                image_row["ocr_embedding"] = element["ocr_embedding"]
+            image_rows.append(image_row)
         elif kind == "table":
             table_rows.append({
                 "table_id": str(uuid.uuid4()),
@@ -221,9 +231,6 @@ def store_file_elements(file_id: str, elements: List[dict]) -> dict:
                 "column_types": element["column_types"],
                 "row_count": element["row_count"],
             })
-
-    if image_rows:
-        ensure_image_vector_index(len(image_rows[0]["embedding"]))
 
     if chunk_rows:
         graph.query(
@@ -240,8 +247,10 @@ def store_file_elements(file_id: str, elements: List[dict]) -> dict:
             """
             MATCH (f:File {file_id: $file_id})
             UNWIND $rows AS row
-            CREATE (i:Image {image_id: row.image_id, element_index: row.element_index, file_name: row.file_name, file_path: row.file_path, embedding: row.embedding})
+            CREATE (i:Image {image_id: row.image_id, element_index: row.element_index, file_name: row.file_name, file_path: row.file_path, semantic_meaning: row.semantic_meaning, semantic_embedding: row.semantic_embedding, ocr_text: row.ocr_text})
             CREATE (f)-[:HAS_IMAGE]->(i)
+            WITH i, row WHERE row.ocr_embedding IS NOT NULL
+            SET i.ocr_embedding = row.ocr_embedding
             """,
             params={"file_id": file_id, "rows": image_rows},
         )

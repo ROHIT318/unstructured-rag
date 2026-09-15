@@ -11,15 +11,13 @@ from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 from PIL import Image
 
-from google import genai
-from google.genai import types
-
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_text_splitters import MarkdownHeaderTextSplitter
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from utils.neo4j_ingestion import create_file_node, store_file_elements
+from utils.img_to_txt import extract_text_from_image
+from utils.neo4j_ingestion import create_file_node, store_file_elements, txt_to_embeddings
 
 load_dotenv()
 
@@ -36,10 +34,38 @@ if BASE_URL:
 
 embedding_model = GoogleGenerativeAIEmbeddings(**embedding_kwargs)
 
-client_kwargs = {"api_key": GEMINI_EMBEDDING_API_KEY}
-if BASE_URL:
-    client_kwargs["http_options"] = {"base_url": BASE_URL}
-client = genai.Client(**client_kwargs)
+
+def enrich_image(image_bytes: bytes, mime_type: str = "image/png") -> dict:
+    """
+    The one shared image enrichment step, run identically at every image entry
+    point (direct upload, PDF page, PPT slide). Produces the image's two texts
+    — semantic meaning (genai) and OCR (pytesseract) — plus Gemini text
+    embeddings of both at the shared text dimension, so image retrieval is
+    text-based and comparable with chunk text. The multimodal image embedding
+    path is gone; image bytes are never embedded anymore.
+
+    Returns the Image-element properties:
+        semantic_meaning, semantic_embedding, ocr_text, and ocr_embedding —
+        the last one omitted entirely when the image has no readable text, so
+        such nodes simply stay out of the OCR vector index.
+
+    Extraction failures are already absorbed inside utils/img_to_txt.py (empty
+    OCR text / fallback semantic string); embedding failures here propagate,
+    like chunk embedding failures do.
+    """
+    ocr_text, semantic_meaning = extract_text_from_image(image_bytes, mime_type)
+
+    texts_to_embed = [semantic_meaning] + ([ocr_text] if ocr_text else [])  
+    embeddings = txt_to_embeddings(texts_to_embed)
+
+    properties = {
+        "semantic_meaning": semantic_meaning,
+        "semantic_embedding": embeddings[0],
+        "ocr_text": ocr_text,
+    }
+    if ocr_text:
+        properties["ocr_embedding"] = embeddings[1]
+    return properties
 
 
 def chunked_documents(text_content: str, chunking_method: str = "text_structure_based"):
@@ -108,12 +134,11 @@ def store_pdf(path: str, model_name: str = str(uuid.uuid4()), chunking_method: s
                 st.write(temp_file_name)
                 with open(temp_file_name, "wb") as f:
                     f.write(image.data)
-                vector = get_image_embedding(image.data, mime_type="image/png")
                 elements.append({
                     "kind": "image",
                     "file_name": file_name,
                     "file_path": temp_file_name,
-                    "embedding": vector,
+                    **enrich_image(image.data, mime_type="image/png"),
                 })
                 pdf_images.append(temp_file_name)
             except Exception as e:
@@ -145,14 +170,6 @@ def store_pdf(path: str, model_name: str = str(uuid.uuid4()), chunking_method: s
     return "Storing PDF operation completed....."
 
 
-def get_image_embedding(image_bytes: bytes, mime_type: str = "image/png") -> list[float]:
-    result = client.models.embed_content(
-        model=GEMINI_EMBEDDING_MODEL,
-        contents=[types.Part.from_bytes(data=image_bytes, mime_type=mime_type)],
-    )
-    return result.embeddings[0].values
-
-
 def store_image(path: str, model_name: str = None, file_name: str = None, return_ids: bool = False, file_id: str = None):
     """
     Arg:
@@ -176,18 +193,18 @@ def store_image(path: str, model_name: str = None, file_name: str = None, return
 
     mime_type = "image/png" if path.endswith(".png") else "image/jpeg"
 
-    vector = get_image_embedding(image_bytes, mime_type=mime_type)
-    st.success(f"Created embeddings for image {file_name}.....")
-
     # The bytes stay on disk in data/images/; the Image node carries the pointer
-    # path and the Gemini image embedding.
+    # path plus the OCR and semantic-meaning texts with their embeddings.
+    properties = enrich_image(image_bytes, mime_type=mime_type)
+    st.success(f"Extracted text and embeddings for image {file_name}.....")
+
     if file_id is None:
         file_id = create_file_node(model_name, file_name, "image")
     stored = store_file_elements(file_id, [{
         "kind": "image",
         "file_name": file_name,
         "file_path": path,
-        "embedding": vector,
+        **properties,
     }])
     st.success(f"Stored image {file_name} in Neo4j.....")
 
@@ -310,12 +327,11 @@ def store_ppt(path: str, model_name: str = str(uuid.uuid4()), chunking_method: s
             with open(image_path, "wb") as f:
                 f.write(image["bytes"])
 
-            embedding = get_image_embedding(image["bytes"], mime_type=image["mime_type"])
             elements.append({
                 "kind": "image",
                 "file_name": file_name,
                 "file_path": image_path,
-                "embedding": embedding,
+                **enrich_image(image["bytes"], mime_type=image["mime_type"]),
             })
             ppt_images.append(image_path)
 
